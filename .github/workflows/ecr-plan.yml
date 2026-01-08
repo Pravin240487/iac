@@ -1,0 +1,138 @@
+name: ECR Terraform Plan
+run-name: ECR-Plan-${{ github.event.inputs.customer_id }}-${{ github.event.inputs.tool_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_id:
+        description: 'Customer ID (e.g., customer0001)'
+        required: true
+        type: string
+      tool_name:
+        description: 'Tool Name (e.g., memory-gadget)'
+        required: true
+        type: string
+
+jobs:
+  ECR_Plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Required Secrets
+        run: |
+          if [[ -z "${{ secrets.ALLOWED_ACCOUNT_IDS }}" ]]; then
+            echo "❌ ERROR: ALLOWED_ACCOUNT_IDS secret is not set"
+            echo "Please configure the ALLOWED_ACCOUNT_IDS secret in repository settings"
+            echo "Expected format: comma-separated account IDs (e.g., 905418116080,123456789013,123456789014)"
+            exit 1
+          fi
+          echo "✅ Required secrets validation passed"
+
+      - name: Generate Repository Name
+        id: repo-name
+        run: |
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          TOOL_NAME="${{ github.event.inputs.tool_name }}"
+          
+          # Validate customer ID format
+          if [[ ! "$CUSTOMER_ID" =~ ^customer[0-9]{4}$ ]]; then
+            echo "❌ Invalid customer ID format. Expected format: customer0001"
+            exit 1
+          fi
+          
+          # Validate tool name (basic validation - alphanumeric and hyphens)
+          if [[ ! "$TOOL_NAME" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$ ]]; then
+            echo "❌ Invalid tool name format. Use lowercase letters, numbers, and hyphens only"
+            exit 1
+          fi
+          
+          # Extract customer number (last 3 digits)
+          CUSTOMER_NUM="${CUSTOMER_ID: -3}"
+          
+          # Generate repository name: cus001-memory-gadget-tool
+          REPOSITORY_NAME="cus${CUSTOMER_NUM}-${TOOL_NAME}-tool"
+          
+          echo "repository_name=$REPOSITORY_NAME" >> $GITHUB_OUTPUT
+          
+          echo "🏷️  Generated Repository Name: $REPOSITORY_NAME"
+          echo "📝 Customer ID: $CUSTOMER_ID"
+          echo "🔧 Tool Name: $TOOL_NAME"
+          echo "🔢 Customer Number: $CUSTOMER_NUM"
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+    
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      - name: Generate Terraform Variables
+        run: |
+          cd ecr-setup
+          
+          # Parse allowed account IDs from secrets (comma-separated)
+          ALLOWED_ACCOUNTS='${{ secrets.ALLOWED_ACCOUNT_IDS }}'
+          
+          # Convert comma-separated to JSON array format
+          IFS=',' read -ra ACCOUNTS <<< "$ALLOWED_ACCOUNTS"
+          ACCOUNT_LIST="["
+          for i in "${!ACCOUNTS[@]}"; do
+            ACCOUNTS[i]=$(echo "${ACCOUNTS[i]}" | xargs) # trim whitespace
+            if [[ $i -gt 0 ]]; then
+              ACCOUNT_LIST+=", "
+            fi
+            ACCOUNT_LIST+="\"${ACCOUNTS[i]}\""
+          done
+          ACCOUNT_LIST+="]"
+          
+          cat > terraform.tfvars << EOF
+          repository_name = "${{ steps.repo-name.outputs.repository_name }}"
+          allowed_account_ids = $ACCOUNT_LIST
+          EOF
+          
+          echo "📝 Generated terraform.tfvars:"
+          cat terraform.tfvars
+
+      - name: Terraform Init
+        run: |
+          cd ecr-setup
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          cd ecr-setup
+          terraform validate
+
+      - name: Terraform Plan
+        run: |
+          cd ecr-setup
+          terraform plan
+          
+      - name: Plan Summary
+        run: |
+          echo "## ECR Terraform Plan Completed! 📋" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Input Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- **Customer ID:** ${{ github.event.inputs.customer_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tool Name:** ${{ github.event.inputs.tool_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Generated Repository:** \`${{ steps.repo-name.outputs.repository_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Configuration Used:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Region: eu-central-1" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment: dev (default)" >> $GITHUB_STEP_SUMMARY
+          echo "- Scan on Push: false (default)" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag Mutability: MUTABLE (default)" >> $GITHUB_STEP_SUMMARY
+          echo "- Project Version: v1 (default)" >> $GITHUB_STEP_SUMMARY
+          echo "- Cross-Account Access: From ALLOWED_ACCOUNT_IDS secret" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Docker Tag Format:** Numeric only (e.g., \`${{ github.run_number }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Step:** Run the ECR Apply workflow with the same inputs to create the repository" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,68 @@
+name: Terraform Plan
+run-name: octonomy-${{ inputs.environment }}-terraform-plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'environment (dev or test or stage or prod)'
+        type: choice
+        required: true
+        options:
+          - dev
+          - test
+          - stage
+          - prod
+
+jobs:
+  Terraform_Plan:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+    
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      # Conditional file removal based on branch/environment
+      - name: Remove files based on branch
+        run: |
+          cd ./appcompute
+          echo "Running file cleanup based on environment: ${{ github.event.inputs.environment }}"
+          if [ "${{ github.event.inputs.environment }}" == "dev" ]; then
+            echo "Removing test_, stage_, and prod_ files for dev environment"
+            rm -f test_* stage_* prod_*
+          elif [ "${{ github.event.inputs.environment }}" == "test" ]; then
+            echo "Removing dev_, stage_, and prod_ files for test environment"
+            rm -f dev_* stage_* prod_*
+          elif [ "${{ github.event.inputs.environment }}" == "stage" ]; then
+            echo "Removing dev_, test_, and prod_ files for test environment"
+            rm -f dev_* test_* prod_*
+          elif [ "${{ github.event.inputs.environment }}" == "prod" ]; then
+            echo "Removing dev_, test_, and stage_ files for test environment"
+            rm -f dev_* test_* stage_*
+          else
+            echo "No file removal needed for environment: ${{ github.event.inputs.environment }}"
+          fi
+
+      - name: Terraform Init
+        run: cd ./appcompute && terraform init -backend-config="key=${{ vars.KEY }}" 
+
+      - name: Terraform Validate
+        id: validate
+        run: cd ./appcompute && terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: cd ./appcompute && terraform plan -var-file=${{ github.event.inputs.environment }}.tfvars

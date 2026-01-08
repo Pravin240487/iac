@@ -1,0 +1,106 @@
+name: ECS Infrastructure Plan
+run-name: ECS-Plan-${{ github.event.inputs.customer_id }}-${{ github.event.inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_id:
+        description: 'Customer ID (e.g., customer0001)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: 'dev'
+
+jobs:
+  ECS_Plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Inputs
+        run: |
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          
+          # Validate customer ID format
+          if [[ ! "$CUSTOMER_ID" =~ ^customer[0-9]{4}$ ]]; then
+            echo "❌ Invalid customer ID format. Expected format: customer0001"
+            exit 1
+          fi
+          
+          # Check if tfvars file exists
+          TFVARS_FILE="custom-code/tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+          if [[ ! -f "$TFVARS_FILE" ]]; then
+            echo "❌ Terraform variables file not found: $TFVARS_FILE"
+            echo "Please ensure the tfvars file exists before running this workflow"
+            exit 1
+          fi
+          
+          echo "✅ Input validation passed"
+          echo "✅ Found tfvars file: $TFVARS_FILE"
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+    
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      - name: Display Terraform Configuration
+        run: |
+          cd custom-code
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          
+          echo "📝 Using existing terraform variables file:"
+          echo "File: tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+          echo "Content preview (first 20 lines):"
+          head -20 "tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+
+      - name: Terraform Init
+        run: |
+          cd custom-code
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          cd custom-code
+          terraform validate
+
+      - name: Terraform Plan
+        run: |
+          cd custom-code
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          terraform plan -var-file="tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+          
+      - name: Plan Summary
+        run: |
+          echo "## ECS Infrastructure Plan Completed! 📋" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Input Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- **Customer ID:** ${{ github.event.inputs.customer_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Terraform vars file:** \`tenants/${{ github.event.inputs.customer_id }}/${{ github.event.inputs.environment }}.tfvars\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Infrastructure Components (from plan):**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🏗️ ECS Cluster (per customer)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🚀 ECS Services (per tool)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎯 Target Groups" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔗 ALB Listener Rules" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ Security Groups" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 Route53 DNS Records" >> $GITHUB_STEP_SUMMARY
+          echo "- 👤 IAM Roles" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Step:** Run the ECS Apply workflow with the same inputs to provision the infrastructure" >> $GITHUB_STEP_SUMMARY

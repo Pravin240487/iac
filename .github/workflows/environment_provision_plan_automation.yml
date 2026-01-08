@@ -1,0 +1,169 @@
+name: Terraform Plan (Automation)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to provision
+        options:
+          - dev
+          - test
+          - stage
+          - prod
+          - poc
+      task_token:
+        required: true
+        type: string
+        description: Step Functions Task Token for callback
+      execution_arn:
+        required: false
+        type: string
+        description: Step Functions execution ARN
+      tenant_id:
+        required: false
+        type: string
+        description: Tenant ID
+
+permissions:
+  id-token: write  # Required for OIDC
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      # Conditional file removal based on branch/environment
+      - name: Remove files based on branch
+        run: |
+          cd ./appcompute
+          echo "Running file cleanup based on environment: ${{ inputs.environment }}"
+          if [ "${{ inputs.environment }}" == "dev" ]; then
+            echo "Removing test_, stage_, and prod_ files for dev environment"
+            rm -f test_* stage_* prod_*
+          elif [ "${{ inputs.environment }}" == "test" ]; then
+            echo "Removing dev_, stage_, and prod_ files for test environment"
+            rm -f dev_* stage_* prod_*
+          elif [ "${{ inputs.environment }}" == "stage" ]; then
+            echo "Removing dev_, test_, and prod_ files for stage environment"
+            rm -f dev_* test_* prod_*
+          elif [ "${{ inputs.environment }}" == "prod" ]; then
+            echo "Removing dev_, test_, and stage_ files for prod environment"
+            rm -f dev_* test_* stage_*
+          else
+            echo "No file removal needed for environment: ${{ inputs.environment }}"
+          fi
+
+      - name: Terraform Init
+        run: cd ./appcompute && terraform init -backend-config="key=${{ vars.KEY }}"
+      
+      - name: Terraform Validate
+        id: validate
+        working-directory: ./appcompute
+        run: |
+          terraform validate
+      
+      - name: Terraform Plan
+        id: plan
+        working-directory: ./appcompute
+        run: |
+          terraform plan -var-file=${{ inputs.environment }}.tfvars -out=tfplan | tee plan_output.txt || true
+          terraform show tfplan > plan_details.txt 2>/dev/null || echo "No plan file generated" > plan_details.txt
+      
+      - name: Set Step Function Role ARN
+        id: set_role
+        run: |
+          ENV="${{ inputs.environment }}"
+          if [ "$ENV" == "dev" ]; then
+            echo "role_arn=${{ secrets.dev_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "test" ]; then
+            echo "role_arn=${{ secrets.test_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "stage" ]; then
+            echo "role_arn=${{ secrets.stage_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "prod" ]; then
+            echo "role_arn=${{ secrets.prod_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "poc" ]; then
+            echo "role_arn=${{ secrets.poc_step_function_role }}" >> $GITHUB_OUTPUT
+          else
+            echo "Unknown environment: $ENV"
+            exit 1
+          fi
+      
+      - name: Unset previous AWS credentials
+        run: |
+          echo "Unsetting previous AWS credentials..."
+          echo "AWS_ACCESS_KEY_ID=" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=" >> $GITHUB_ENV
+          echo "AWS_SESSION_TOKEN=" >> $GITHUB_ENV
+      
+      - name: Reconfigure AWS Credentials for Step Functions
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.set_role.outputs.role_arn }}
+          aws-region: ${{ secrets.AWS_REGION || 'eu-central-1' }}
+          role-session-name: GitHubActions-Plan-${{ github.run_id }}
+          mask-aws-account-id: false
+      
+      - name: Get GitHub Actions Run URL
+        id: run_url
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "run_url=$RUN_URL" >> $GITHUB_OUTPUT
+          echo "GitHub Actions Run URL: $RUN_URL"
+      
+      - name: Prepare Task Output (Metadata Only)
+        run: |
+          # Only pass metadata, not the full plan output (to avoid 256KB limit)
+          PLAN_OUTPUT_SIZE=$(wc -c < appcompute/plan_output.txt 2>/dev/null | tr -d ' ' || echo 0)
+          PLAN_DETAILS_SIZE=$(wc -c < appcompute/plan_details.txt 2>/dev/null | tr -d ' ' || echo 0)
+          
+          cat > task_output.json <<EOF
+          {
+            "plan_completed": true,
+            "status": "success",
+            "environment": "${{ inputs.environment }}",
+            "github_run_url": "${{ steps.run_url.outputs.run_url }}",
+            "github_run_id": "${{ github.run_id }}",
+            "github_repository": "${{ github.repository }}",
+            "plan_output_size": ${PLAN_OUTPUT_SIZE},
+            "plan_details_size": ${PLAN_DETAILS_SIZE}
+          }
+          EOF
+          echo "Task output prepared (size: $(wc -c < task_output.json | tr -d ' ') bytes)"
+      
+      - name: Return Result to Step Functions
+        if: success()
+        run: |
+          aws stepfunctions send-task-success \
+            --task-token "${{ inputs.task_token }}" \
+            --task-output file://task_output.json \
+            --region ${{ secrets.AWS_REGION || 'eu-central-1' }}
+      
+      - name: Send Task Failure on Error
+        if: failure()
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ERROR_MSG="Terraform plan workflow failed. Check GitHub Actions logs: $RUN_URL"
+          aws stepfunctions send-task-failure \
+            --task-token "${{ inputs.task_token }}" \
+            --error "PlanFailed" \
+            --cause "$ERROR_MSG" \
+            --region ${{ secrets.AWS_REGION || 'eu-central-1' }}
+
