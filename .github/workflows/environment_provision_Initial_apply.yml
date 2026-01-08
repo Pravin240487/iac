@@ -1,0 +1,48 @@
+name: Terraform Initial Apply
+run-name: octonomy-${{ inputs.environment }}-initial-terraform-apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'environment (dev or test or stage or prod)'
+        type: choice
+        required: true
+        options:
+          - dev
+          - test
+          - stage
+          - prod
+
+jobs:
+  Terraform_Apply:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+
+      - name: Terraform Init
+        run: cd ./appcompute && terraform init -backend-config="key=${{ vars.KEY }}" 
+
+      - name: Terraform Validate
+        id: validate
+        run: cd ./appcompute && terraform validate
+      
+      - name: Terraform Apply
+        id: apply
+        run: cd ./appcompute && ./provision.sh ${{ github.event.inputs.environment }}

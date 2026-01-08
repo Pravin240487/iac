@@ -1,0 +1,56 @@
+name: Envoy Proxy Setup Terraform Plan
+run-name: Envoy-Proxy-Setup-${{ inputs.envoy_proxy_name }}-terraform-plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      envoy_proxy_name:
+        description: 'Envoy Proxy name (e.g., wenko-stage-proxy)'
+        type: string
+        required: true
+
+jobs:
+  Terraform_Plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+    
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      - name: Validate Envoy Proxy Setup Directory
+        run: |
+          if [ ! -d "envoy-proxy-setup/${{ github.event.inputs.envoy_proxy_name }}" ]; then
+            echo "Error: Directory envoy-proxy-setup/${{ github.event.inputs.envoy_proxy_name }} does not exist"
+            exit 1
+          fi
+          echo "Validated directory: envoy-proxy-setup/${{ github.event.inputs.envoy_proxy_name }}"
+
+      - name: Terraform Init
+        run: |
+          cd envoy-proxy-setup/${{ github.event.inputs.envoy_proxy_name }}
+          terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd envoy-proxy-setup/${{ github.event.inputs.envoy_proxy_name }}
+          terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd envoy-proxy-setup/${{ github.event.inputs.envoy_proxy_name }}
+          terraform plan -var-file=${{ github.event.inputs.envoy_proxy_name }}.tfvars
+

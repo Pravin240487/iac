@@ -1,0 +1,36 @@
+name: SonarCloud Analysis
+run-name: SonarQube-Analysis-main
+
+on:
+  workflow_dispatch:  # Only allow manual trigger
+
+jobs:
+  sonarqube:
+    name: SonarCloud Scan
+    runs-on: ubuntu-latest
+
+    # ✅ This line must be directly under the job (not at the top level!)
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
+
+
+      # Optional: Fail if Quality Gate is red
+      # - name: Check Quality Gate
+      #   uses: SonarSource/sonarqube-quality-gate-action@v1
+      #   timeout-minutes: 5
+      #   env:
+      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

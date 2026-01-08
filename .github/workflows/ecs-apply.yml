@@ -1,0 +1,164 @@
+name: ECS Infrastructure Apply
+run-name: ECS-Apply-${{ github.event.inputs.customer_id }}-${{ github.event.inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer_id:
+        description: 'Customer ID (e.g., customer0001)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+        default: 'dev'
+
+jobs:
+  ECS_Apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Inputs
+        run: |
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          
+          # Validate customer ID format
+          if [[ ! "$CUSTOMER_ID" =~ ^customer[0-9]{4}$ ]]; then
+            echo "❌ Invalid customer ID format. Expected format: customer0001"
+            exit 1
+          fi
+          
+          # Check if tfvars file exists
+          TFVARS_FILE="custom-code/tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+          if [[ ! -f "$TFVARS_FILE" ]]; then
+            echo "❌ Terraform variables file not found: $TFVARS_FILE"
+            echo "Please ensure the tfvars file exists before running this workflow"
+            exit 1
+          fi
+          
+          echo "✅ Input validation passed"
+          echo "✅ Found tfvars file: $TFVARS_FILE"
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+          terraform_wrapper: false
+    
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      - name: Display Terraform Configuration
+        run: |
+          cd custom-code
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          
+          echo "📝 Using existing terraform variables file:"
+          echo "File: tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+          echo "Content preview (first 20 lines):"
+          head -20 "tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars"
+
+      - name: Terraform Init
+        run: |
+          cd custom-code
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          cd custom-code
+          terraform validate
+
+      - name: Terraform Apply
+        run: |
+          cd custom-code
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          terraform apply -var-file="tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars" -auto-approve
+          
+      - name: Get Infrastructure Details
+        id: infra-details
+        run: |
+          cd custom-code
+          
+          # Get terraform outputs if available (outputs may not be defined)
+          ECS_CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null || echo "")
+          ALB_DNS=$(terraform output -raw alb_dns_name 2>/dev/null || echo "")
+          
+          # If terraform outputs aren't available, construct expected names
+          if [[ -z "$ECS_CLUSTER" ]]; then
+            CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+            ENVIRONMENT="${{ github.event.inputs.environment }}"
+            ECS_CLUSTER="qs-${ENVIRONMENT}-ec1-${CUSTOMER_ID}-ecs-v2"
+          fi
+          
+          echo "ecs_cluster=$ECS_CLUSTER" >> $GITHUB_OUTPUT
+          echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
+          
+          echo "✅ ECS Cluster: $ECS_CLUSTER"
+          if [[ -n "$ALB_DNS" ]]; then
+            echo "✅ ALB DNS: $ALB_DNS"
+          fi
+          
+      - name: Apply Summary
+        run: |
+          echo "## ECS Infrastructure Deployed Successfully! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Input Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- **Customer ID:** ${{ github.event.inputs.customer_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Terraform vars file:** \`tenants/${{ github.event.inputs.customer_id }}/${{ github.event.inputs.environment }}.tfvars\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Infrastructure Created:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🏗️ **ECS Cluster:** \`${{ steps.infra-details.outputs.ecs_cluster }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 🚀 **ECS Services:** Created for each tool defined in tfvars" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎯 **Target Groups:** Application Load Balancer targets" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔗 **ALB Listener Rules:** Traffic routing rules" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ **Security Groups:** Network access controls" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 **Route53 DNS Records:** Custom domain routing" >> $GITHUB_STEP_SUMMARY
+          echo "- 👤 **IAM Roles:** ECS task and execution roles" >> $GITHUB_STEP_SUMMARY
+          if [[ -n "${{ steps.infra-details.outputs.alb_dns }}" ]]; then
+            echo "- 🌍 **ALB DNS:** \`${{ steps.infra-details.outputs.alb_dns }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Multi-Tenant Configuration:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Customer-specific ECS cluster created" >> $GITHUB_STEP_SUMMARY
+          echo "- Individual ECS services per tool" >> $GITHUB_STEP_SUMMARY
+          echo "- Isolated network and security configurations" >> $GITHUB_STEP_SUMMARY
+          echo "- Custom hostname and API prefix routing" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. 📦 Build and push Docker images to ECR repositories" >> $GITHUB_STEP_SUMMARY
+          echo "2. 🔄 Update ECS services with new image tags" >> $GITHUB_STEP_SUMMARY
+          echo "3. 🧪 Test application endpoints via ALB/Route53" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tools Deployed (from tfvars):**" >> $GITHUB_STEP_SUMMARY
+          
+          # Extract and display tool information from tfvars
+          cd custom-code
+          CUSTOMER_ID="${{ github.event.inputs.customer_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          
+          # Use grep to extract tool configurations
+          grep -A 10 "tools = {" "tenants/${CUSTOMER_ID}/${ENVIRONMENT}.tfvars" | grep -E "(tool_name|image_tag|container_port)" | while read line; do
+            if [[ "$line" =~ tool_name.*=.*\"(.*)\" ]]; then
+              TOOL_NAME="${BASH_REMATCH[1]}"
+              echo "- 🔧 **$TOOL_NAME**" >> $GITHUB_STEP_SUMMARY
+            elif [[ "$line" =~ image_tag.*=.*\"(.*)\" ]]; then
+              IMAGE_TAG="${BASH_REMATCH[1]}"
+              echo "  - Image Tag: \`$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
+            elif [[ "$line" =~ container_port.*=.*([0-9]+) ]]; then
+              PORT="${BASH_REMATCH[1]}"
+              echo "  - Port: $PORT" >> $GITHUB_STEP_SUMMARY
+            fi
+          done || true

@@ -1,0 +1,55 @@
+name: Proxy VPC Terraform Plan
+run-name: Proxy-VPC-${{ inputs.proxy_vpc_name }}-terraform-plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxy_vpc_name:
+        description: 'Proxy VPC name (e.g., wenko-stage-proxy)'
+        type: string
+        required: true
+
+jobs:
+  Terraform_Plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+    
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      - name: Validate Proxy VPC Directory
+        run: |
+          if [ ! -d "proxy-vpcs/${{ github.event.inputs.proxy_vpc_name }}" ]; then
+            echo "Error: Directory proxy-vpcs/${{ github.event.inputs.proxy_vpc_name }} does not exist"
+            exit 1
+          fi
+          echo "Validated directory: proxy-vpcs/${{ github.event.inputs.proxy_vpc_name }}"
+
+      - name: Terraform Init
+        run: |
+          cd proxy-vpcs/${{ github.event.inputs.proxy_vpc_name }}
+          terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd proxy-vpcs/${{ github.event.inputs.proxy_vpc_name }}
+          terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd proxy-vpcs/${{ github.event.inputs.proxy_vpc_name }}
+          terraform plan -var-file=${{ github.event.inputs.proxy_vpc_name }}.tfvars

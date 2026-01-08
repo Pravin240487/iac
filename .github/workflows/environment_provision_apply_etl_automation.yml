@@ -1,0 +1,167 @@
+name: Terraform Apply ETL (Automation)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Environment to provision
+        options:
+          - dev
+          - test
+          - stage
+          - prod
+          - poc
+      task_token:
+        required: true
+        type: string
+        description: Step Functions Task Token for callback
+      execution_arn:
+        required: false
+        type: string
+        description: Step Functions execution ARN
+      tenant_id:
+        required: false
+        type: string
+        description: Tenant ID
+
+permissions:
+  id-token: write  # Required for OIDC
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      TF_VAR_ARGUN_AUTH_TOKEN: ${{ secrets.TF_VAR_ARGUN_AUTH_TOKEN }}
+      TF_VAR_DBMS_AUTH_TOKEN: ${{ secrets.TF_VAR_DBMS_AUTH_TOKEN }}
+      TF_VAR_ETL_AUTH_TOKEN: ${{ secrets.TF_VAR_ETL_AUTH_TOKEN }}
+      TF_VAR_INTEG_AUTH_TOKEN: ${{ secrets.TF_VAR_INTEG_AUTH_TOKEN }}
+      TF_VAR_SCH_AUTH_TOKEN: ${{ secrets.TF_VAR_SCH_AUTH_TOKEN }}
+      TF_VAR_API_ENDPOINT: ${{ secrets.TF_VAR_API_ENDPOINT }}
+      TF_VAR_C4_DB_PASSWORD: ${{ secrets.C4_DB_PASSWORD }}
+      TF_VAR_C5_DB_PASSWORD: ${{ secrets.C5_DB_PASSWORD }}
+      TF_VAR_C6_DB_PASSWORD: ${{ secrets.C6_DB_PASSWORD }}
+      TF_VAR_C13_DB_PASSWORD: ${{ secrets.C13_DB_PASSWORD }}
+      TF_VAR_C14_DB_PASSWORD: ${{ secrets.C14_DB_PASSWORD }}
+      TF_VAR_COMMON_DB_PASSWORD: ${{ secrets.COMMON_DB_PASSWORD }}
+      TF_VAR_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.1
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: "eu-central-1"
+
+      - name: Download Step Functions
+        if: ${{ inputs.environment == 'dev' || inputs.environment == 'stage' || inputs.environment == 'prod' }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3
+          export AWS_ACCOUNT_ID=${{ vars.AWS_ACCOUNT_ID }}
+          export Environment=${{ inputs.environment }}
+          python .github/workflows/download_step_functions.py
+
+      - name: Terraform Init
+        working-directory: ./etl
+        run: |
+          terraform init -backend-config="key=${{ vars.KEY_ETL }}"
+
+      - name: Terraform Validate
+        id: validate
+        working-directory: ./etl
+        run: |
+          terraform validate
+          
+      - name: Terraform Apply
+        id: apply
+        working-directory: ./etl
+        run: |
+          terraform apply -var-file=${{ inputs.environment }}.tfvars -auto-approve
+      
+      - name: Set Step Function Role ARN
+        id: set_role
+        run: |
+          ENV="${{ inputs.environment }}"
+          if [ "$ENV" == "dev" ]; then
+            echo "role_arn=${{ secrets.dev_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "test" ]; then
+            echo "role_arn=${{ secrets.test_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "stage" ]; then
+            echo "role_arn=${{ secrets.stage_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "prod" ]; then
+            echo "role_arn=${{ secrets.prod_step_function_role }}" >> $GITHUB_OUTPUT
+          elif [ "$ENV" == "poc" ]; then
+            echo "role_arn=${{ secrets.poc_step_function_role }}" >> $GITHUB_OUTPUT
+          else
+            echo "Unknown environment: $ENV"
+            exit 1
+          fi
+      
+      - name: Unset previous AWS credentials
+        run: |
+          echo "Unsetting previous AWS credentials..."
+          echo "AWS_ACCESS_KEY_ID=" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=" >> $GITHUB_ENV
+          echo "AWS_SESSION_TOKEN=" >> $GITHUB_ENV
+      
+      - name: Reconfigure AWS Credentials for Step Functions
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.set_role.outputs.role_arn }}
+          aws-region: ${{ secrets.AWS_REGION || 'eu-central-1' }}
+          role-session-name: GitHubActions-Apply-ETL-${{ github.run_id }}
+          mask-aws-account-id: false
+      
+      - name: Get GitHub Actions Run URL
+        id: run_url
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "run_url=$RUN_URL" >> $GITHUB_OUTPUT
+          echo "GitHub Actions Run URL: $RUN_URL"
+      
+      - name: Prepare Task Output (Metadata Only)
+        run: |
+          cat > task_output.json <<EOF
+          {
+            "apply_completed": true,
+            "status": "success",
+            "environment": "${{ inputs.environment }}",
+            "github_run_url": "${{ steps.run_url.outputs.run_url }}",
+            "github_run_id": "${{ github.run_id }}",
+            "github_repository": "${{ github.repository }}"
+          }
+          EOF
+          echo "Task output prepared (size: $(wc -c < task_output.json | tr -d ' ') bytes)"
+      
+      - name: Return Result to Step Functions
+        if: success()
+        run: |
+          aws stepfunctions send-task-success \
+            --task-token "${{ inputs.task_token }}" \
+            --task-output file://task_output.json \
+            --region ${{ secrets.AWS_REGION || 'eu-central-1' }}
+      
+      - name: Send Task Failure on Error
+        if: failure()
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ERROR_MSG="Terraform apply ETL workflow failed. Check GitHub Actions logs: $RUN_URL"
+          aws stepfunctions send-task-failure \
+            --task-token "${{ inputs.task_token }}" \
+            --error "ApplyETLFailed" \
+            --cause "$ERROR_MSG" \
+            --region ${{ secrets.AWS_REGION || 'eu-central-1' }}
+
